@@ -1,16 +1,19 @@
 import socket
 import threading
+import json
 from datetime import datetime
+import os
 
-HOST = "0.0.0.0"
 PORT = 5000
-NODOS = [
-    ("192.168.209.134", 5000), #vm1
-    ("192.168.209.133", 5000), #vm2
-    ("192.168.209.125", 5000), #vm3
-    ("192.168.209.131", 5000)  #vm4
-]
 
+N_HOST = socket.gethostname()
+
+with open("config.json") as f:
+    config = json.load(f)
+
+NODOS = [(n["host"], n["port"]) for n in config["nodos"]]
+
+# Guardado de Mensajes
 def guardar(msg):
     with open("chat.txt", "a") as f:
         f.write(msg + "\n")
@@ -18,10 +21,10 @@ def guardar(msg):
 # Servidor
 def recibir():
     s = socket.socket()
-    s.bind((HOST, PORT))
+    s.bind(("0.0.0.0", PORT))
     s.listen()
 
-    print("Escuchando...")
+    print(f"{N_HOST} escuchando...")
 
     while True:
         conn, addr = s.accept()
@@ -38,20 +41,21 @@ def enviar():
     while True:
         msg = input("Mensaje: ")
         timestamp = datetime.now().strftime("%H:%M:%S")
-        mensaje = f"[{timestamp}] {msg}"
+        mensaje = f"[{N_HOST}{timestamp}] {msg}"
 
-        for nodo in NODOS:
+        for host, port in NODOS:
+            if host == N_HOST:
+                continue
+            
             try:
                 s = socket.socket()
-                s.connect(nodo)
-                s.send(mensaje.encode())
-
+                s.connect((host,port))
+                s.send(mensaje.encode)
                 resp = s.recv(1024).decode()
-                print("ACK:", resp)
-
-                s.close()
+                print(f"ACK de {N_HOST}:", resp)
+                s.close()   
             except:
-                pass
+                print(f"No se pudo conectar a {N_HOST}")
 
 # Paralelismo
 threading.Thread(target=recibir).start()

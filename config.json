@@ -1,0 +1,8 @@
+{
+    "nodos": [
+        {"host": "vm1", "port": 5000},
+        {"host": "vm2", "port": 5000},
+        {"host": "vm3", "port": 5000},
+        {"host": "vm4", "port": 5000}
+    ]
+}
