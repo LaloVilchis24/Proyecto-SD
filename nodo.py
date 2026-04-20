@@ -50,12 +50,12 @@ def enviar():
             try:
                 s = socket.socket()
                 s.connect((host,port))
-                s.send(mensaje.encode)
+                s.send(mensaje.encode())
                 resp = s.recv(1024).decode()
                 print(f"ACK de {N_HOST}:", resp)
                 s.close()   
             except:
-                print(f"No se pudo conectar a {N_HOST}")
+                print(f"No se pudo conectar a {host}")
 
 # Paralelismo
 threading.Thread(target=recibir).start()
