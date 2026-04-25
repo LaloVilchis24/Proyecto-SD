@@ -1,4 +1,5 @@
 {
+    "mi_nombre": "vm1",
     "nodos": [
         {"host": "vm1", "port": 5000},
         {"host": "vm2", "port": 5000},
