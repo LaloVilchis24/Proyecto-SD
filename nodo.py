@@ -43,24 +43,35 @@ def recibir():
 def enviar():
     while True:
         msg = input("Mensaje: ")
+
+        print("\nNodos disponibles:")
+        disponibles = [n for n in NODOS if n[0] != MI_NOMBRE]
+
+        for i, (host, port) in enumerate(disponibles):
+            print(f"{i}: {host}:{port}")
+
+        # 🔹 Elegir nodo
+        try:
+            opcion = int(input("Selecciona nodo: "))
+            host, port = disponibles[opcion]
+        except:
+            print("Opción inválida")
+            continue
+
         timestamp = datetime.now().strftime("%H:%M:%S")
         mensaje = f"[{MI_NOMBRE} {timestamp}] {msg}"
 
-        for host, port in NODOS:
-            if host == MI_NOMBRE:
-                continue
+        try:
+            s = socket.socket()
+            s.connect((host, port))
+            s.send(mensaje.encode())
 
-            try:
-                s = socket.socket()
-                s.connect((host, port))
-                s.send(mensaje.encode())
+            resp = s.recv(1024).decode()
+            print(f"ACK de {host}:", resp)
 
-                resp = s.recv(1024).decode()
-                print(f"ACK de {host}:", resp)
-
-                s.close()
-            except Exception as e:
-                print(f"No se pudo conectar a {host}: {e}")
+            s.close()
+        except Exception as e:
+            print(f"No se pudo conectar a {host}: {e}")
 
 threading.Thread(target=recibir, daemon=True).start()
 threading.Thread(target=enviar, daemon=True).start()
