@@ -15,7 +15,7 @@ PORT = 5000
 
 DB_LOCK = threading.Lock()
 DB_FILE = "db.json"
-MAESTRO_ACTUAL = "vm1"  # Por diseño inicial, vm1 arranca como maestro
+MAESTRO_ACTUAL = "vm1" 
 
 def cargar_db():
     with DB_LOCK:
@@ -35,13 +35,11 @@ def guardar_db(data):
 # ==========================================
 
 def enviar_mensaje(host, port, mensaje_dict):
-    """Envía un diccionario JSON a un nodo específico y espera respuesta."""
     try:
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         s.settimeout(2.0)
         s.connect((host, port))
         s.send(json.dumps(mensaje_dict).encode("utf-8"))
-        
         respuesta = s.recv(4096).decode("utf-8")
         s.close()
         return json.loads(respuesta)
@@ -49,23 +47,19 @@ def enviar_mensaje(host, port, mensaje_dict):
         return {"status": "ERROR", "error": str(e)}
 
 def difundir_consenso(mensaje_dict):
-    """El Maestro envía la orden de replicación a TODOS los nodos de la red."""
     for nodo in NODOS:
-        # Enviamos a todos, incluso a nosotros mismos para mantener homogeneidad
         res = enviar_mensaje(nodo["host"], nodo["port"], mensaje_dict)
         if res.get("status") == "ERROR":
             print(f"[CONSENSO] Nodo {nodo['host']} no respondió a la replicación.")
 
 # ==========================================
-# 🔹 SERVIDOR: ESCUCHA Y PROCESAMIENTO
+# 🔹 SERVIDOR: PROCESAMIENTO EN RED
 # ==========================================
 
 def despachar_peticion(conn, addr):
-    """Manejador de solicitudes entrantes por red."""
     try:
         data = conn.recv(4096).decode("utf-8")
-        if not data:
-            return
+        if not data: return
         
         peticion = json.loads(data)
         tipo = peticion.get("tipo")
@@ -73,19 +67,30 @@ def despachar_peticion(conn, addr):
         
         respuesta = {"status": "REJECT", "info": "Petición no reconocida"}
 
-        # Rol Esclavo/Todos: Acatar la replicación ordenada por el maestro
+        # REPLICACIÓN GLOBAL (Consenso)
         if tipo == "REPLICAR_COMMIT":
             guardar_db(payload["db"])
             print(f"\n[REPLICACIÓN] Base de datos sincronizada por orden del Maestro.")
             respuesta = {"status": "ACK"}
 
-        # Rol Maestro: Recibir solicitudes de nuevos tickets
+        # ENRUTAMIENTO AL MAESTRO (Exclusión mutua y balanceo)
         elif tipo == "SOLICITAR_TICKET_NUEVO":
             if MI_NOMBRE != MAESTRO_ACTUAL:
                 respuesta = {"status": "ERROR", "error": "No soy el nodo maestro"}
             else:
-                # Procesar atómicamente en el maestro (Exclusión Mutua)
                 respuesta = procesar_ticket_en_maestro(payload)
+
+        elif tipo == "SOLICITAR_ALTA_DISPOSITIVO":
+            if MI_NOMBRE != MAESTRO_ACTUAL:
+                respuesta = {"status": "ERROR", "error": "No soy el nodo maestro"}
+            else:
+                respuesta = procesar_dispositivo_en_maestro(payload)
+
+        elif tipo == "SOLICITAR_CIERRE_TICKET":
+            if MI_NOMBRE != MAESTRO_ACTUAL:
+                respuesta = {"status": "ERROR", "error": "No soy el nodo maestro"}
+            else:
+                respuesta = procesar_cierre_en_maestro(payload)
 
         conn.send(json.dumps(respuesta).encode("utf-8"))
     except Exception as e:
@@ -94,7 +99,6 @@ def despachar_peticion(conn, addr):
         conn.close()
 
 def servidor_escucha():
-    """Hilo encargado de mantener el puerto abierto."""
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     try:
@@ -104,107 +108,218 @@ def servidor_escucha():
     except Exception as e:
         print(f"Error crítico al abrir el puerto: {e}")
         return
-
     while True:
         try:
             conn, addr = s.accept()
-            # Despachar cada petición en un hilo nuevo para no congelar la red
             threading.Thread(target=despachar_peticion, args=(conn, addr), daemon=True).start()
-        except:
-            break
+        except: break
 
 # ==========================================
-# 🔹 LÓGICA CORE EN EL MAESTRO
+# 🔹 LÓGICA ATÓMICA EN EL NODO MAESTRO
 # ==========================================
 
 def procesar_ticket_en_maestro(payload):
-    """El maestro ejecuta la lógica de asignación y esparce el resultado."""
     db = cargar_db()
     id_u = payload["id_usuario"]
     id_d = payload["id_dispositivo"]
     sucursal_origen = payload["sucursal"]
 
-    # Algoritmo de asignación óptimo (Menos cargado)
+    # Validar existencia de usuario y dispositivo antes de asignar
+    usuario_existe = any(u["id"] == id_u for u in db["usuarios"])
+    dispositivo_existe = any(d["id"] == id_d for d in db["dispositivos"])
+
+    if not usuario_existe:
+        return {"status": "ERROR", "error": f"El usuario {id_u} no existe en la base de datos."}
+    if not dispositivo_existe:
+        return {"status": "ERROR", "error": f"El dispositivo {id_d} no está registrado."}
+
+    # Algoritmo de asignación óptimo (Exclusión mutua centralizada)
     ingenieros_locales = [i for i in db["ingenieros"] if i["sucursal"] == sucursal_origen]
     candidatos = ingenieros_locales if ingenieros_locales else db["ingenieros"]
     
     if not candidatos:
-        return {"status": "ERROR", "error": "No hay ingenieros en el sistema"}
+        return {"status": "ERROR", "error": "No hay ingenieros configurados en el sistema"}
         
     ingeniero = min(candidatos, key=lambda x: x["tickets_asignados"])
     
-    # Generar folio oficial
     num_ticket = f"TK{len(db['tickets']) + 1:03d}"
     folio = f"{id_u}+{ingeniero['id']}+{sucursal_origen}+{num_ticket}"
     
     nuevo_ticket = {
         "folio": folio,
         "id_usuario": id_u,
-        "id_ingeniero": ingeniero["id"],
+        "id_ingeniero":Core_id := ingeniero["id"],
         "id_dispositivo": id_d,
         "sucursal": sucursal_origen,
         "estado": "ABIERTO"
     }
     
-    # Impactar cambios en la estructura de datos del maestro
-    ingeniero["tickets_asignados"] += 1
+    # Modificar estado interno del maestro
+    for i in db["ingenieros"]:
+        if i["id"] == Core_id:
+            i["tickets_asignados"] += 1
+            break
+
     db["tickets"].append(nuevo_ticket)
     
-    # CONSENSO / REPLICACIÓN: Obligar a todos los nodos a adoptar este nuevo estado
-    msg_consenso = {"tipo": "REPLICAR_COMMIT", "payload": {"db": db}}
-    difundir_consenso(msg_consenso)
-    
+    # Consenso
+    difundir_consenso({"tipo": "REPLICAR_COMMIT", "payload": {"db": db}})
     return {"status": "SUCCESS", "folio": folio, "ingeniero": ingeniero["nombre"]}
+
+def procesar_dispositivo_en_maestro(payload):
+    db = cargar_db()
+    id_d = payload["id_dispositivo"]
+    tipo_d = payload["tipo"]
+
+    if any(d["id"] == id_d for d in db["dispositivos"]):
+        return {"status": "ERROR", "error": f"El dispositivo {id_d} ya existe."}
+
+    # 🔹 ALGORITMO: Distribución Equitativa de Dispositivos (Balanceo de Carga)
+    # Contamos cuántos dispositivos tiene asignada cada sucursal actualmente
+    conteo_sucursales = {"vm1": 0, "vm2": 0, "vm3": 0, "vm4": 0}
+    for d in db["dispositivos"]:
+        suc = d["sucursal_asignada"]
+        if suc in conteo_sucursales:
+            conteo_sucursales[suc] += 1
+
+    # Elegimos la sucursal con el número mínimo de dispositivos
+    sucursal_elegida = min(conteo_sucursales, key=conteo_sucursales.get)
+
+    nuevo_dispositivo = {
+        "id": id_d,
+        "tipo": tipo_d,
+        "sucursal_asignada": sucursal_elegida
+    }
+    db["dispositivos"].append(nuevo_dispositivo)
+
+    # Consenso
+    difundir_consenso({"tipo": "REPLICAR_COMMIT", "payload": {"db": db}})
+    return {"status": "SUCCESS", "sucursal_asignada": sucursal_elegida}
+
+def procesar_cierre_en_maestro(payload):
+    db = cargar_db()
+    folio_buscar = payload["folio"]
+
+    ticket = next((t for t in db["tickets"] if t["folio"] == folio_buscar), None)
+    if not ticket:
+        return {"status": "ERROR", "error": "El folio de ticket especificado no existe."}
+    
+    if ticket["estado"] == "CERRADO":
+        return {"status": "ERROR", "error": "Este ticket ya se encuentra CERRADO."}
+
+    # Modificar el estado del ticket y liberar la carga del ingeniero asignado
+    ticket["estado"] = "CERRADO"
+    id_ing = ticket["id_ingeniero"]
+
+    for i in db["ingenieros"]:
+        if i["id"] == id_ing:
+            if i["tickets_asignados"] > 0:
+                i["tickets_asignados"] -= 1
+            break
+
+    # Consenso
+    difundir_consenso({"tipo": "REPLICAR_COMMIT", "payload": {"db": db}})
+    return {"status": "SUCCESS"}
 
 # ==========================================
 # 🔹 INTERFAZ DE USUARIO CON RED
 # ==========================================
 
+def submenu_consultas():
+    while True:
+        print("\n--- 🔍 SUBMENÚ DE CONSULTAS DISTRIBUIDAS ---")
+        print("1. Ver lista de Ingenieros")
+        print("2. Ver lista de Usuarios")
+        print("3. Ver lista de Dispositivos por Sucursal")
+        print("4. Ver Tickets Abiertos")
+        print("5. Regresar al Menú Principal")
+        op = input("Selecciona una opción: ")
+        
+        db = cargar_db()
+        if op == "1":
+            print("\n--- INGENIEROS ---")
+            for i in db["ingenieros"]:
+                print(f"ID: {i['id']} | Nombre: {i['nombre']} | Sucursal: {i['sucursal']} | Tickets Activos: {i['tickets_asignados']}")
+        elif op == "2":
+            print("\n--- USUARIOS ---")
+            for u in db["usuarios"]:
+                print(f"ID: {u['id']} | Nombre: {u['nombre']}")
+        elif op == "3":
+            print("\n--- DISPOSITIVOS DISTRIBUIDOS ---")
+            for d in db["dispositivos"]:
+                print(f"ID: {d['id']} | Tipo: {d['tipo']} | Sucursal Asignada: {d['sucursal_asignada']}")
+        elif op == "4":
+            print("\n--- TICKETS ABIERTOS ---")
+            abiertos = [t for t in db["tickets"] if t["estado"] == "ABIERTO"]
+            if not abiertos: print("No hay tickets pendientes.")
+            for t in abiertos:
+                print(f"Folio: {t['folio']} | Dispositivo: {t['id_dispositivo']} | Estado: {t['estado']}")
+        elif op == "5":
+            break
+
 def menu():
-    # Arrancar el servidor en un hilo secundario daemon
     threading.Thread(target=servidor_escucha, daemon=True).start()
-    time.sleep(0.5) # Pausa para dejar que el puerto se abra limpio
+    time.sleep(0.5)
+
+    try:
+        maestro_info = next(n for n in NODOS if n["host"] == MAESTRO_ACTUAL)
+    except StopIteration:
+        print("Error crítico en archivo config.json")
+        return
 
     while True:
         print(f"\n--- SUCURSAL COOPERATIVA: {MI_NOMBRE} ---")
         print(f"Nodo Maestro Actual: {MAESTRO_ACTUAL}")
-        print("1. Consultar Base de Datos Local Replicada")
-        print("2. Levantar Ticket de Soporte (Vía Red/Maestro)")
-        print("3. Salir")
+        print("1. Menú de Consultas Específicas")
+        print("2. Levantar Ticket de Soporte [USUARIOS]")
+        print("3. Agregar Dispositivo [INGENIEROS]")
+        print("4. Cerrar Ticket de Soporte [INGENIEROS]")
+        print("5. Salir")
         
         opcion = input("Selecciona una opción: ")
         
         if opcion == "1":
-            db = cargar_db()
-            print("\n================ ESTADO DE LA DB REPLICADA ================")
-            print(json.dumps(db, indent=2, ensure_ascii=False))
-            print("============================================================\n")
+            submenu_consultas()
             
         elif opcion == "2":
-            id_u = input("ID Usuario: ").strip().upper()
-            id_d = input("ID Dispositivo: ").strip().upper()
+            id_u = input("ID Usuario [Ejemplo: USR01]: ").strip().upper()
+            id_d = input("ID Dispositivo [Ejemplo: DEV01]: ").strip().upper()
+            if not id_u or not id_d: continue
             
-            # Preparar la transacción remota
-            peticion = {
-                "tipo": "SOLICITAR_TICKET_NUEVO",
-                "payload": {"id_usuario": id_u, "id_dispositivo": id_d, "sucursal": MI_NOMBRE}
-            }
-            
-            # Buscar la dirección del maestro en la configuración
-            maestro_info = next(n for n in NODOS if n["host"] == MAESTRO_ACTUAL)
-            print(f"[RED] Enviando solicitud al nodo maestro ({MAESTRO_ACTUAL})...")
-            
-            # Enviar la petición al maestro
+            peticion = {"tipo": "SOLICITAR_TICKET_NUEVO", "payload": {"id_usuario": id_u, "id_dispositivo": id_d, "sucursal": MI_NOMBRE}}
             respuesta = enviar_mensaje(maestro_info["host"], maestro_info["port"], peticion)
             
             if respuesta.get("status") == "SUCCESS":
-                print(f"\n✅ Ticket creado globalmente por el maestro!")
-                print(f"Folio: {respuesta['folio']}")
-                print(f"Asignado a: {respuesta['ingeniero']}")
+                print(f"\n✅ Ticket Creado!\nFolio: {respuesta['folio']}\nAsignado a: {respuesta['ingeniero']}")
             else:
-                print(f"\n❌ Error al crear el ticket: {respuesta.get('error', 'Desconocido')}")
+                print(f"\n❌ Error: {respuesta.get('error')}")
                 
         elif opcion == "3":
+            id_d = input("Asigna ID al nuevo dispositivo [Ejemplo: DEV03]: ").strip().upper()
+            tipo_d = input("Tipo de dispositivo [Ejemplo: Impresora HP]: ").strip()
+            if not id_d or not tipo_d: continue
+
+            peticion = {"tipo": "SOLICITAR_ALTA_DISPOSITIVO", "payload": {"id_dispositivo": id_d, "tipo": tipo_d}}
+            respuesta = enviar_mensaje(maestro_info["host"], maestro_info["port"], peticion)
+
+            if respuesta.get("status") == "SUCCESS":
+                print(f"\n✅ Dispositivo Registrado y distribuido equitativamente a la sucursal: {respuesta['sucursal_asignada']}")
+            else:
+                print(f"\n❌ Error: {respuesta.get('error')}")
+
+        elif opcion == "4":
+            folio = input("Introduce el Folio Completo del Ticket a cerrar: ").strip()
+            if not folio: continue
+
+            peticion = {"tipo": "SOLICITAR_CIERRE_TICKET", "payload": {"folio": folio}}
+            respuesta = enviar_mensaje(maestro_info["host"], maestro_info["port"], peticion)
+
+            if respuesta.get("status") == "SUCCESS":
+                print(f"\n✅ ¡El ticket ha sido cerrado con éxito globalmente!")
+            else:
+                print(f"\n❌ Error: {respuesta.get('error')}")
+                
+        elif opcion == "5":
             break
 
 if __name__ == "__main__":
