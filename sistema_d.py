@@ -145,10 +145,13 @@ def procesar_ticket_en_maestro(payload):
     num_ticket = f"TK{len(db['tickets']) + 1:03d}"
     folio = f"{id_u}+{ingeniero['id']}+{sucursal_origen}+{num_ticket}"
     
+    # 🔹 CORRECCIÓN AQUÍ: Guardamos el ID por separado y creamos el ticket limpio
+    id_ing_asignado = ingeniero["id"]
+
     nuevo_ticket = {
         "folio": folio,
         "id_usuario": id_u,
-        "id_ingeniero":Core_id := ingeniero["id"],
+        "id_ingeniero": id_ing_asignado,
         "id_dispositivo": id_d,
         "sucursal": sucursal_origen,
         "estado": "ABIERTO"
@@ -156,7 +159,7 @@ def procesar_ticket_en_maestro(payload):
     
     # Modificar estado interno del maestro
     for i in db["ingenieros"]:
-        if i["id"] == Core_id:
+        if i["id"] == id_ing_asignado:
             i["tickets_asignados"] += 1
             break
 
