@@ -1,0 +1,18 @@
+{
+    "ingenieros": [
+        {"id": "ING01", "nombre": "Eduardo Uno", "sucursal": "vm1", "tickets_asignados": 0},
+        {"id": "ING02", "nombre": "Alan Dos", "sucursal": "vm2", "tickets_asignados": 0},
+        {"id": "ING03", "nombre": "Emmanuel Tres", "sucursal": "vm3", "tickets_asignados": 0},
+        {"id": "ING04", "nombre": "Jonathan Cuatro", "sucursal": "vm4", "tickets_asignados": 0}
+    ],
+    "usuarios": [
+        {"id": "USR01", "nombre": "JP Cinco"},
+        {"id": "USR02", "nombre": "Brisa Seis"},
+        {"id": "USR03", "nombre": "Iris Siete"}
+    ],
+    "dispositivos": [
+        {"id": "DEV01", "tipo": "Laptop Dell", "sucursal_asignada": "vm1"},
+        {"id": "DEV02", "tipo": "Servidor HP", "sucursal_asignada": "vm2"}
+    ],
+    "tickets": []
+}
