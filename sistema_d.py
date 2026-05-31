@@ -239,6 +239,12 @@ def ejecutar_redistribucion_por_falla(nodo_muerto):
 def hilo_heartbeat():
     """Monitorea la red, actualiza la lista viva y detecta caídas de forma exacta."""
     global NODOS_ACTIVOS, MAESTRO_ACTUAL, EN_ELECCION
+    
+    # 🔹 SOLUCIÓN: Tiempo de gracia de 15 segundos para que todas las VMs alcancen a encender
+    print("[INFO] Sistema de monitoreo en espera. Enciende las otras VMs...")
+    time.sleep(15)
+    print("[INFO] Monitoreo de alta disponibilidad ACTIVO.")
+
     while True:
         time.sleep(2.5)
         if EN_ELECCION: continue
