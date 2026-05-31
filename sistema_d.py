@@ -189,7 +189,7 @@ def procesar_cierre_en_maestro(payload):
 
 # 🔹 REQUISITO FASE 5: REDISTRIBUIR SOPORTES POR FALLA
 def ejecutar_redistribucion_por_falla(nodo_muerto):
-    """El maestro toma control de los pendientes del nodo caído y los reparte."""
+    """El maestro toma control de los pendientes del nodo caído, reasigna ingenieros y REGENERA los folios."""
     if MI_NOMBRE != MAESTRO_ACTUAL: return
     
     db = cargar_db()
@@ -204,16 +204,13 @@ def ejecutar_redistribucion_por_falla(nodo_muerto):
 
     for idx, tk in enumerate(tickets_afectados):
         nueva_sucursal = sobrevivientes[idx % len(sobrevivientes)]
-        print(f" -> Reasignando Ticket {tk['folio'].split('+')[-1]} a sucursal: {nueva_sucursal}")
-        
-        # Actualizar sucursal de atención
-        tk["sucursal"] = nueva_sucursal
         
         # Buscar un ingeniero libre de la nueva sucursal sobreviviente
         candidatos = [i for i in db["ingenieros"] if i["sucursal"] == nueva_sucursal]
         if candidatos:
             ing_elegido = min(candidatos, key=lambda x: x["tickets_asignados"])
-            # Decrementar al ingeniero anterior del nodo muerto de forma lógica si es posible
+            
+            # Decrementar la carga del ingeniero de la sucursal caída
             old_ing = tk["id_ingeniero"]
             for i in db["ingenieros"]:
                 if i["id"] == old_ing and i["tickets_asignados"] > 0:
@@ -221,7 +218,19 @@ def ejecutar_redistribucion_por_falla(nodo_muerto):
                 if i["id"] == ing_elegido["id"]:
                     i["tickets_asignados"] += 1
             
+            # Extraer el ID corto del ticket del folio anterior (ej: "TK001")
+            id_ticket_corto = tk["folio"].split("+")[-1]
+            
+            # 🔹 CORRECCIÓN CRÍTICA: Regeneramos el Folio con los nuevos datos distribuidos
+            # Formato: IDUSUARIO+IDINGENIERO+SUCURSAL+IDTICKET
+            nuevo_folio = f"{tk['id_usuario']}+{ing_elegido['id']}+{nueva_sucursal}+{id_ticket_corto}"
+            
+            print(f" -> Ticket {id_ticket_corto} migrado: Anterior Folio asignado a {nodo_muerto} -> Nuevo Folio: {nuevo_folio}")
+            
+            # Actualizar los datos del ticket en el JSON global
+            tk["sucursal"] = nueva_sucursal
             tk["id_ingeniero"] = ing_elegido["id"]
+            tk["folio"] = nuevo_folio
 
     # 2. Re-balancear dispositivos asignados a la sucursal caída
     for d in db["dispositivos"]:
@@ -230,6 +239,7 @@ def ejecutar_redistribucion_por_falla(nodo_muerto):
             d["sucursal_asignada"] = nueva_suc
 
     guardar_db(db)
+    # Forzar consenso inmediato de la reorganización
     difundir_consenso({"tipo": "REPLICAR_COMMIT", "payload": {"db": db}})
 
 # ==========================================
