@@ -55,9 +55,7 @@ def difundir_consenso(mensaje_dict):
     global NODOS_ACTIVOS
     for nodo in NODOS:
         if nodo["host"] in NODOS_ACTIVOS:
-            res = enviar_mensaje(nodo["host"], nodo["port"], mensaje_dict)
-            if res.get("status") == "ERROR" and nodo["host"] == MI_NOMBRE:
-                pass
+            enviar_mensaje(nodo["host"], nodo["port"], mensaje_dict)
 
 # ==========================================
 # 🔹 SERVIDOR: RESPUESTAS DINÁMICAS
@@ -91,6 +89,13 @@ def despachar_peticion(conn, addr):
         elif tipo == "SOLICITAR_CIERRE_TICKET":
             respuesta = procesar_cierre_en_maestro(payload) if MI_NOMBRE == MAESTRO_ACTUAL else {"status": "ERROR", "error": "No soy el maestro"}
 
+        # Nuevos despachadores de actualización de catálogos
+        elif tipo == "SOLICITAR_ALTA_USUARIO":
+            respuesta = procesar_usuario_en_maestro(payload) if MI_NOMBRE == MAESTRO_ACTUAL else {"status": "ERROR", "error": "No soy el maestro"}
+
+        elif tipo == "SOLICITAR_ALTA_INGENIERO":
+            respuesta = procesar_ingeniero_en_maestro(payload) if MI_NOMBRE == MAESTRO_ACTUAL else {"status": "ERROR", "error": "No soy el maestro"}
+
         elif tipo == "ELECTION":
             if ID_NUMERICO > payload["id_emisor"]:
                 respuesta = {"status": "OK"}
@@ -123,8 +128,35 @@ def servidor_escucha():
         except: break
 
 # ==========================================
-# 🔹 LÓGICA DEL MAESTRO & REDISTRIBUCIÓN (FASE 5)
+# 🔹 LÓGICA DEL MAESTRO & ACTUALIZACIONES (CONSENSO)
 # ==========================================
+
+def procesar_usuario_en_maestro(payload):
+    db = cargar_db()
+    id_u, nombre = payload["id_usuario"], payload["nombre"]
+
+    if any(u["id"] == id_u for u in db["usuarios"]):
+        return {"status": "ERROR", "error": f"El Usuario con ID {id_u} ya existe."}
+
+    db["usuarios"].append({"id": id_u, "nombre": nombre})
+    difundir_consenso({"tipo": "REPLICAR_COMMIT", "payload": {"db": db}})
+    return {"status": "SUCCESS"}
+
+def procesar_ingeniero_en_maestro(payload):
+    db = cargar_db()
+    id_i, nombre, sucursal = payload["id_ingeniero"], payload["nombre"], payload["sucursal"]
+
+    if any(i["id"] == id_i for i in db["ingenieros"]):
+        return {"status": "ERROR", "error": f"El Ingeniero con ID {id_i} ya existe."}
+
+    db["ingenieros"].append({
+        "id": id_i, 
+        "nombre": nombre, 
+        "sucursal": sucursal, 
+        "tickets_asignados": 0
+    })
+    difundir_consenso({"tipo": "REPLICAR_COMMIT", "payload": {"db": db}})
+    return {"status": "SUCCESS"}
 
 def procesar_ticket_en_maestro(payload):
     db = cargar_db()
@@ -187,71 +219,45 @@ def procesar_cierre_en_maestro(payload):
     difundir_consenso({"tipo": "REPLICAR_COMMIT", "payload": {"db": db}})
     return {"status": "SUCCESS"}
 
-# 🔹 REQUISITO FASE 5: REDISTRIBUIR SOPORTES POR FALLA
 def ejecutar_redistribucion_por_falla(nodo_muerto):
-    """El maestro toma control de los pendientes del nodo caído, reasigna ingenieros y REGENERA los folios."""
     if MI_NOMBRE != MAESTRO_ACTUAL: return
-    
     db = cargar_db()
     print(f"\n[F5 - REDISTRIBUCIÓN] Limpiando pendientes de la sucursal caída: {nodo_muerto}")
-    
-    # 1. Encontrar tickets abiertos que pertenecían a la sucursal caída
     tickets_afectados = [t for t in db["tickets"] if t["sucursal"] == nodo_muerto and t["estado"] == "ABIERTO"]
-    
-    # Filtrar nodos sobrevivientes activos para repartir
     sobrevivientes = [n for n in NODOS_ACTIVOS if n != nodo_muerto]
     if not sobrevivientes: return
 
     for idx, tk in enumerate(tickets_afectados):
         nueva_sucursal = sobrevivientes[idx % len(sobrevivientes)]
-        
-        # Buscar un ingeniero libre de la nueva sucursal sobreviviente
         candidatos = [i for i in db["ingenieros"] if i["sucursal"] == nueva_sucursal]
         if candidatos:
             ing_elegido = min(candidatos, key=lambda x: x["tickets_asignados"])
-            
-            # Decrementar la carga del ingeniero de la sucursal caída
             old_ing = tk["id_ingeniero"]
             for i in db["ingenieros"]:
-                if i["id"] == old_ing and i["tickets_asignados"] > 0:
-                    i["tickets_asignados"] -= 1
-                if i["id"] == ing_elegido["id"]:
-                    i["tickets_asignados"] += 1
+                if i["id"] == old_ing and i["tickets_asignados"] > 0: i["tickets_asignados"] -= 1
+                if i["id"] == ing_elegido["id"]: i["tickets_asignados"] += 1
             
-            # Extraer el ID corto del ticket del folio anterior (ej: "TK001")
             id_ticket_corto = tk["folio"].split("+")[-1]
-            
-            # 🔹 CORRECCIÓN CRÍTICA: Regeneramos el Folio con los nuevos datos distribuidos
-            # Formato: IDUSUARIO+IDINGENIERO+SUCURSAL+IDTICKET
             nuevo_folio = f"{tk['id_usuario']}+{ing_elegido['id']}+{nueva_sucursal}+{id_ticket_corto}"
-            
-            print(f" -> Ticket {id_ticket_corto} migrado: Anterior Folio asignado a {nodo_muerto} -> Nuevo Folio: {nuevo_folio}")
-            
-            # Actualizar los datos del ticket en el JSON global
             tk["sucursal"] = nueva_sucursal
             tk["id_ingeniero"] = ing_elegido["id"]
             tk["folio"] = nuevo_folio
 
-    # 2. Re-balancear dispositivos asignados a la sucursal caída
     for d in db["dispositivos"]:
         if d["sucursal_asignada"] == nodo_muerto:
             nueva_suc = sobrevivientes[len(db["dispositivos"]) % len(sobrevivientes)]
             d["sucursal_asignada"] = nueva_suc
 
     guardar_db(db)
-    # Forzar consenso inmediato de la reorganización
     difundir_consenso({"tipo": "REPLICAR_COMMIT", "payload": {"db": db}})
 
 # ==========================================
-# 🔹 MOTOR DE ALTA DISPONIBILIDAD MEJORADO
+# 🔹 MOTOR DE ALTA DISPONIBILIDAD
 # ==========================================
 
 def hilo_heartbeat():
-    """Monitorea la red, actualiza la lista viva y detecta caídas de forma exacta."""
     global NODOS_ACTIVOS, MAESTRO_ACTUAL, EN_ELECCION
-    
-    # 🔹 SOLUCIÓN: Tiempo de gracia de 15 segundos para que todas las VMs alcancen a encender
-    print("[INFO] Sistema de monitoreo en espera. Enciende las otras VMs...")
+    print("[INFO] Sistema de monitoreo en espera (15s)...")
     time.sleep(15)
     print("[INFO] Monitoreo de alta disponibilidad ACTIVO.")
 
@@ -262,22 +268,17 @@ def hilo_heartbeat():
         lista_vivos_ahora = []
         maestro_respondio = False
 
-        # Escanear agresivamente quién está vivo y quién no
         for nodo in NODOS:
             res = enviar_mensaje(nodo["host"], nodo["port"], {"tipo": "PING"}, timeout=0.5)
             if res.get("status") == "ALIVE":
                 lista_vivos_ahora.append(nodo["host"])
-                if nodo["host"] == MAESTRO_ACTUAL:
-                    maestro_respondio = True
+                if nodo["host"] == MAESTRO_ACTUAL: maestro_respondio = True
             else:
-                # Si el maestro detecta que alguien desapareció de la lista viva
                 if MI_NOMBRE == MAESTRO_ACTUAL and nodo["host"] in NODOS_ACTIVOS:
                     NODOS_ACTIVOS.remove(nodo["host"])
                     ejecutar_redistribucion_por_falla(nodo["host"])
 
         NODOS_ACTIVOS = lista_vivos_ahora
-
-        # Si no soy el maestro y veo que el líder murió, convoco a elecciones de inmediato
         if MI_NOMBRE != MAESTRO_ACTUAL and not maestro_respondio:
             print(f"\n[!] Líder {MAESTRO_ACTUAL} caído. Convocando elecciones...")
             iniciar_eleccion()
@@ -285,10 +286,7 @@ def hilo_heartbeat():
 def iniciar_eleccion():
     global EN_ELECCION, MAESTRO_ACTUAL
     EN_ELECCION = True
-    
-    # Solo competir contra nodos con ID mayor que estén REALMENTE activos en este instante
     nodos_mayores = [n for n in NODOS if int(n["host"].replace("vm", "")) > ID_NUMERICO and n["host"] in NODOS_ACTIVOS]
-    
     if not nodos_mayores:
         proclamarse_maestro()
         return
@@ -297,17 +295,15 @@ def iniciar_eleccion():
     for n in nodos_mayores:
         res = enviar_mensaje(n["host"], n["port"], {"tipo": "ELECTION", "payload": {"id_emisor": ID_NUMERICO}}, timeout=0.8)
         if res.get("status") == "OK":
-            recibi_ok = True
-            break 
+            recibi_ok = True; break 
             
-    if not recibi_ok:
-        proclamarse_maestro()
+    if not recibi_ok: proclamarse_maestro()
 
 def proclamarse_maestro():
     global MAESTRO_ACTUAL, EN_ELECCION
     MAESTRO_ACTUAL = MI_NOMBRE
     EN_ELECCION = False
-    print(f"\n👑 [LOG] ¡Gané las elecciones! Nuevo líder: {MAESTRO_ACTUAL}.")
+    print(f"\n [LOG] ¡Gané las elecciones! Nuevo líder: {MAESTRO_ACTUAL}.")
     for nodo in NODOS:
         if nodo["host"] != MI_NOMBRE and nodo["host"] in NODOS_ACTIVOS:
             enviar_mensaje(nodo["host"], nodo["port"], {"tipo": "COORDINATOR", "payload": {"maestro": MI_NOMBRE}}, timeout=0.5)
@@ -318,7 +314,7 @@ def proclamarse_maestro():
 
 def submenu_consultas():
     while True:
-        print("\n--- 🔍 SUBMENÚ DE CONSULTAS DISTRIBUIDAS ---")
+        print("\n--- SUBMENÚ DE CONSULTAS DISTRIBUIDAS ---")
         print("1. Ver lista de Ingenieros")
         print("2. Ver lista de Usuarios")
         print("3. Ver lista de Dispositivos por Sucursal")
@@ -327,11 +323,11 @@ def submenu_consultas():
         op = input("Selecciona una opción: ")
         db = cargar_db()
         if op == "1":
-            for i in db["ingenieros"]: print(f"ID: {i['id']} | Nombre: {i['nombre']} | Sucursal: {i['sucursal']} | Tickets: {i['tickets_asignados']}")
+            for i in db["ingenieros"]: print(f"ID: {i['id']} | Nombre: {i['nombre']} | Sucursal: {i['sucursal']} | Tickets Activos: {i['tickets_asignados']}")
         elif op == "2":
             for u in db["usuarios"]: print(f"ID: {u['id']} | Nombre: {u['nombre']}")
         elif op == "3":
-            for d in db["dispositivos"]: print(f"ID: {d['id']} | Tipo: {d['tipo']} | Sucursal: {d['sucursal_asignada']}")
+            for d in db["dispositivos"]: print(f"ID: {d['id']} | Tipo: {d['tipo']} | Sucursal Asignada: {d['sucursal_asignada']}")
         elif op == "4":
             abiertos = [t for t in db["tickets"] if t["estado"] == "ABIERTO"]
             if not abiertos: print("No hay tickets abiertos.")
@@ -343,7 +339,6 @@ def menu():
     threading.Thread(target=servidor_escucha, daemon=True).start()
     time.sleep(0.5)
     
-    # 🔹 LOGICA DE SUCURSAL RESURRECTA: Al encender, pregunta quién está vivo y quién es el jefe real
     for n in NODOS:
         if n["host"] != MI_NOMBRE:
             res = enviar_mensaje(n["host"], n["port"], {"tipo": "PING"}, timeout=0.5)
@@ -362,34 +357,61 @@ def menu():
         print(f"\n--- SUCURSAL: {MI_NOMBRE} ---")
         print(f"Líder Coordinador Actual: {MAESTRO_ACTUAL}")
         print(f"Nodos Activos en Red: {NODOS_ACTIVOS}")
-        print("1. Menú de Consultas")
-        print("2. Levantar Ticket de Soporte [USUARIOS]")
-        print("3. Agregar Dispositivo [INGENIEROS]")
-        print("4. Cerrar Ticket de Soporte [INGENIEROS]")
-        print("5. Salir")
+        print("1. Menú de Consultas Específicas")
+        print("2. Registrar Nuevo Usuario [ACTUALIZAR TABLA]")
+        print("3. Registrar Nuevo Ingeniero [ACTUALIZAR TABLA]")
+        print("4. Levantar Ticket de Soporte [USUARIOS - EXC. MUTUA]")
+        print("5. Agregar Dispositivo [INGENIEROS - EQUITATIVO]")
+        print("6. Cerrar Ticket de Soporte [INGENIEROS]")
+        print("7. Salir")
         
         opcion = input("Selecciona una opción: ")
         
         if opcion == "1":
             submenu_consultas()
+            
         elif opcion == "2":
+            id_u = input("Asigna ID al nuevo Usuario [ej: USR04]: ").strip().upper()
+            nombre_u = input("Nombre completo del Usuario: ").strip()
+            if not id_u or not nombre_u: continue
+
+            peticion = {"tipo": "SOLICITAR_ALTA_USUARIO", "payload": {"id_usuario": id_u, "nombre": nombre_u}}
+            res = enviar_mensaje(maestro_info["host"], maestro_info["port"], peticion)
+            print(f"\n Usuario registrado por consenso global!" if res.get("status") == "SUCCESS" else f"\n❌ Error: {res.get('error')}")
+
+        elif opcion == "3":
+            id_i = input("Asigna ID al nuevo Ingeniero [ej: ING05]: ").strip().upper()
+            nombre_i = input("Nombre completo del Ingeniero: ").strip()
+            suc_i = input(f"Sucursal base para este ingeniero (vm1 a vm4) [Dejar vacío para usar {MI_NOMBRE}]: ").strip().lower()
+            if not suc_i: suc_i = MI_NOMBRE
+            if not id_i or not nombre_i: continue
+
+            peticion = {"tipo": "SOLICITAR_ALTA_INGENIERO", "payload": {"id_ingeniero": id_i, "nombre": nombre_i, "sucursal": suc_i}}
+            res = enviar_mensaje(maestro_info["host"], maestro_info["port"], peticion)
+            print(f"\n Ingeniero registrado por consenso global en {suc_i}!" if res.get("status") == "SUCCESS" else f"\n❌ Error: {res.get('error')}")
+
+        elif opcion == "4":
             id_u = input("ID Usuario [ej: USR01]: ").strip().upper()
             id_d = input("ID Dispositivo [ej: DEV01]: ").strip().upper()
             if not id_u or not id_d: continue
             res = enviar_mensaje(maestro_info["host"], maestro_info["port"], {"tipo": "SOLICITAR_TICKET_NUEVO", "payload": {"id_usuario": id_u, "id_dispositivo": id_d, "sucursal": MI_NOMBRE}})
-            print(f"\n✅ Ticket Creado! Folio: {res['folio']}" if res.get("status") == "SUCCESS" else f"\n❌ Error: {res.get('error')}")
-        elif opcion == "3":
+            print(f"\n Ticket Creado! Folio: {res['folio']}\nAsignado a: {res['ingeniero']}" if res.get("status") == "SUCCESS" else f"\n❌ Error: {res.get('error')}")
+            
+        elif opcion == "5":
             id_d = input("ID del dispositivo [ej: DEV03]: ").strip().upper()
             tipo_d = input("Tipo [ej: Impresora]: ").strip()
             if not id_d or not tipo_d: continue
             res = enviar_mensaje(maestro_info["host"], maestro_info["port"], {"tipo": "SOLICITAR_ALTA_DISPOSITIVO", "payload": {"id_dispositivo": id_d, "tipo": tipo_d}})
-            print(f"\n✅ Distribuido a la sucursal: {res['sucursal_asignada']}" if res.get("status") == "SUCCESS" else f"\n❌ Error: {res.get('error')}")
-        elif opcion == "4":
+            print(f"\n Distribuido a la sucursal: {res['sucursal_asignada']}" if res.get("status") == "SUCCESS" else f"\n❌ Error: {res.get('error')}")
+            
+        elif opcion == "6":
             id_tk = input("Introduce el ID corto del Ticket a cerrar [ej: TK001]: ").strip().upper()
             if not id_tk: continue
             res = enviar_mensaje(maestro_info["host"], maestro_info["port"], {"tipo": "SOLICITAR_CIERRE_TICKET", "payload": {"id_ticket": id_tk}})
-            print("\n✅ ¡El ticket ha sido cerrado globalmente!" if res.get("status") == "SUCCESS" else f"\n❌ Error: {res.get('error')}")
-        elif opcion == "5": break
+            print("\n ¡El ticket ha sido cerrado globalmente!" if res.get("status") == "SUCCESS" else f"\n❌ Error: {res.get('error')}")
+            
+        elif opcion == "7": 
+            break
 
 if __name__ == "__main__":
     menu()
