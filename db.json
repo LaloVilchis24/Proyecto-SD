@@ -1,14 +1,14 @@
 {
     "ingenieros": [
-        {"id": "ING01", "nombre": "Eduardo Uno", "sucursal": "vm1", "tickets_asignados": 0},
-        {"id": "ING02", "nombre": "Alan Dos", "sucursal": "vm2", "tickets_asignados": 0},
-        {"id": "ING03", "nombre": "Emmanuel Tres", "sucursal": "vm3", "tickets_asignados": 0},
-        {"id": "ING04", "nombre": "Jonathan Cuatro", "sucursal": "vm4", "tickets_asignados": 0}
+        {"id": "ING01", "nombre": "Edu ING", "sucursal": "vm1", "tickets_asignados": 0},
+        {"id": "ING02", "nombre": "Alan ING", "sucursal": "vm2", "tickets_asignados": 0},
+        {"id": "ING03", "nombre": "Emma ING", "sucursal": "vm3", "tickets_asignados": 0},
+        {"id": "ING04", "nombre": "JP ING", "sucursal": "vm4", "tickets_asignados": 0}
     ],
     "usuarios": [
-        {"id": "USR01", "nombre": "JP Cinco"},
-        {"id": "USR02", "nombre": "Brisa Seis"},
-        {"id": "USR03", "nombre": "Iris Siete"}
+        {"id": "USR01", "nombre": "Jonathan USER"},
+        {"id": "USR02", "nombre": "Brisa USER"},
+        {"id": "USR03", "nombre": "Iris USER"}
     ],
     "dispositivos": [
         {"id": "DEV01", "tipo": "Laptop Dell", "sucursal_asignada": "vm1"},
