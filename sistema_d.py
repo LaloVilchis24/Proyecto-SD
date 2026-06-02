@@ -122,6 +122,10 @@ def despachar_peticion(conn, addr):
         if tipo == "PING":
             respuesta = {"status": "ALIVE", "maestro": MAESTRO_ACTUAL}
 
+        # --- CASO DE RESPALDO PARA SINCRO POST-FALLA ---
+        elif tipo == "SOLICITAR_RESPALDO_DB":
+            respuesta = {"status": "SUCCESS", "db": cargar_db()}
+
         # --- MANEJADORES DE CONSENSO 2PC ---
         elif tipo == "PREPARE_2PC":
             db_temporal_preparada = payload["db"]
@@ -144,17 +148,13 @@ def despachar_peticion(conn, addr):
             
             with mutex_lock:
                 lamport_clock = max(lamport_clock, req_clock) + 1
-                
-                # Regla de decisión de Ricart-Agrawala
                 id_req = int(req_nodo.replace("vm", ""))
                 yo_compitiendo = reclamando_seccion_critica
                 
                 if yo_compitiendo and (req_clock > lamport_clock or (req_clock == lamport_clock and id_req > ID_NUMERICO)):
-                    # Mi petición tiene prioridad, difiero la respuesta guardando la conexión
                     peticiones_diferidas.append(conn)
-                    return # No cerramos la conexión ni mandamos mensaje aún
+                    return 
                 else:
-                    # No estoy compitiendo o su prioridad es mayor, respondo OK de inmediato
                     conn.send(json.dumps({"status": "MUTEX_OK"}).encode("utf-8"))
                     return
 
@@ -456,11 +456,11 @@ def submenu_consultas():
 
 def menu():
     global MAESTRO_ACTUAL, NODOS_ACTIVOS
-    # 1. Iniciar el servidor en segundo plano para escuchar peticiones
+    # 1. Encender el servidor primero para que este nodo pueda recibir tráfico de inmediato
     threading.Thread(target=servidor_escucha, daemon=True).start()
-    time.sleep(0.5)
+    time.sleep(1.0) # Tiempo de estabilización para el socket local
     
-    # 2. Descubrir quién es el Maestro Actual al arrancar
+    # 2. Rastrear la red para localizar quién es el Maestro activo en este momento
     maestro_detectado = None
     for n in NODOS:
         if n["host"] != MI_NOMBRE:
@@ -470,38 +470,26 @@ def menu():
                 MAESTRO_ACTUAL = maestro_detectado
                 break
 
-    # 3. --- NUEVA FASE DE SINCRONIZACIÓN INICIAL POR RECUPERACIÓN ---
+    # 3. FASE DE RECOVERY: Si hay un maestro en la red, le pedimos la base de datos actualizada
     if maestro_detectado:
-        try:
-            info_maestro = next(n for n in NODOS if n["host"] == maestro_detectado)
-            print(f"[SINCRONIZACIÓN] Nodo reconectado. Solicitando base de datos actualizada a {maestro_detectado}...")
-            
-            # Le pedimos al maestro su base de datos actual para ponernos al corriente
-            # Aprovechamos que procesar las peticiones de consulta carga la DB del maestro
-            # Creamos un mensaje rápido para pedir el estado completo
-            res_db = enviar_mensaje(info_maestro["host"], info_maestro["port"], {"tipo": "PING"}, timeout=1.0)
-            
-            # Para hacerlo limpio sin meter más tipos de mensajes, podemos hacer que el maestro 
-            # responda un PING especial o añadir un manejador rápido en despachar_peticion.
-            # Pero para no complicarte, hagamos que pida una réplica directa si el maestro está vivo:
-            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            s.settimeout(1.0)
-            s.connect((info_maestro["host"], info_maestro["port"]))
-            s.send(json.dumps({"tipo": "SOLICITAR_RESPALDO_DB"}).encode("utf-8"))
-            data_res = s.recv(1024 * 16).decode("utf-8")
-            s.close()
-            
-            resp_db = json.loads(data_res)
-            if resp_db.get("status") == "SUCCESS":
-                guardar_db(resp_db["db"])
-                print("[SINCRONIZACIÓN] Base de datos local actualizada con éxito.")
-        except:
-            print("[WARN] No se pudo sincronizar la base de datos al arrancar. Operando con caché local.")
-    # ---------------------------------------------------------------
+        print(f"[SINCRONIZACIÓN] Nodo reconectado. Solicitando base de datos actualizada a {maestro_detectado}...")
+        info_maestro = next(n for n in NODOS if n["host"] == maestro_detectado)
+        
+        # Hacemos la petición estructurada usando nuestra función confiable de mensajes
+        res_db = enviar_mensaje(info_maestro["host"], info_maestro["port"], {"tipo": "SOLICITAR_RESPALDO_DB"}, timeout=2.0)
+        
+        if res_db.get("status") == "SUCCESS" and "db" in res_db:
+            guardar_db(res_db["db"])
+            print("[SINCRONIZACIÓN] Base de datos local actualizada con éxito.")
+        else:
+            print("[WARN] No se pudo obtener el respaldo del maestro. Operando con archivo local anterior.")
+    else:
+        print("[INFO] No se detectaron otros nodos activos. Iniciando como nodo aislado temporalmente.")
 
-    # 4. Iniciar el monitoreo de alta disponibilidad (Heartbeat)
+    # 4. Iniciar el hilo de alta disponibilidad (Heartbeat masivo)
     threading.Thread(target=hilo_heartbeat, daemon=True).start()
 
+    # 5. Bucle principal de interfaz de usuario
     while True:
         try:
             maestro_info = next(n for n in NODOS if n["host"] == MAESTRO_ACTUAL)
