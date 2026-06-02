@@ -455,17 +455,51 @@ def submenu_consultas():
         elif op == "5": break
 
 def menu():
-    global MAESTRO_ACTUAL
+    global MAESTRO_ACTUAL, NODOS_ACTIVOS
+    # 1. Iniciar el servidor en segundo plano para escuchar peticiones
     threading.Thread(target=servidor_escucha, daemon=True).start()
     time.sleep(0.5)
     
+    # 2. Descubrir quién es el Maestro Actual al arrancar
+    maestro_detectado = None
     for n in NODOS:
         if n["host"] != MI_NOMBRE:
             res = enviar_mensaje(n["host"], n["port"], {"tipo": "PING"}, timeout=0.5)
             if res.get("status") == "ALIVE":
-                MAESTRO_ACTUAL = res["maestro"]
+                maestro_detectado = res["maestro"]
+                MAESTRO_ACTUAL = maestro_detectado
                 break
 
+    # 3. --- NUEVA FASE DE SINCRONIZACIÓN INICIAL POR RECUPERACIÓN ---
+    if maestro_detectado:
+        try:
+            info_maestro = next(n for n in NODOS if n["host"] == maestro_detectado)
+            print(f"[SINCRONIZACIÓN] Nodo reconectado. Solicitando base de datos actualizada a {maestro_detectado}...")
+            
+            # Le pedimos al maestro su base de datos actual para ponernos al corriente
+            # Aprovechamos que procesar las peticiones de consulta carga la DB del maestro
+            # Creamos un mensaje rápido para pedir el estado completo
+            res_db = enviar_mensaje(info_maestro["host"], info_maestro["port"], {"tipo": "PING"}, timeout=1.0)
+            
+            # Para hacerlo limpio sin meter más tipos de mensajes, podemos hacer que el maestro 
+            # responda un PING especial o añadir un manejador rápido en despachar_peticion.
+            # Pero para no complicarte, hagamos que pida una réplica directa si el maestro está vivo:
+            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            s.settimeout(1.0)
+            s.connect((info_maestro["host"], info_maestro["port"]))
+            s.send(json.dumps({"tipo": "SOLICITAR_RESPALDO_DB"}).encode("utf-8"))
+            data_res = s.recv(1024 * 16).decode("utf-8")
+            s.close()
+            
+            resp_db = json.loads(data_res)
+            if resp_db.get("status") == "SUCCESS":
+                guardar_db(resp_db["db"])
+                print("[SINCRONIZACIÓN] Base de datos local actualizada con éxito.")
+        except:
+            print("[WARN] No se pudo sincronizar la base de datos al arrancar. Operando con caché local.")
+    # ---------------------------------------------------------------
+
+    # 4. Iniciar el monitoreo de alta disponibilidad (Heartbeat)
     threading.Thread(target=hilo_heartbeat, daemon=True).start()
 
     while True:
@@ -516,14 +550,13 @@ def menu():
             if not id_u or not id_d: continue
             
             print("\n[MUTEX] Solicitando entrada a Sección Crítica Distribuida (Ricart-Agrawala)...")
-            # Adquisición de la sección crítica real distribuida
             if solicitar_acceso_mutex_global():
                 print("[MUTEX] Acceso concedido a la Sección Crítica. Procesando ticket...")
                 res = enviar_mensaje(maestro_info["host"], maestro_info["port"], {
                     "tipo": "SOLICITAR_TICKET_NUEVO", 
                     "payload": {"id_usuario": id_u, "id_dispositivo": id_d, "sucursal": MI_NOMBRE}
                 })
-                liberar_mutex_global() # Salida de sección crítica distribuidora
+                liberar_mutex_global()
                 print(f"\n[OK] Ticket Creado! Folio: {res['folio']}\nAsignado a: {res['ingeniero']}" if res.get("status") == "SUCCESS" else f"\n[ERROR] {res.get('error')}")
             else:
                 print("\n[ERROR] Acceso denegado o colisión en la exclusión mutua distribuidora.")
